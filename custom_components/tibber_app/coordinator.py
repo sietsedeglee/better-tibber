@@ -36,7 +36,11 @@ from .const import (
     GIZMO_THERMOSTAT,
     SCAN_INTERVAL,
     STALE_GRACE,
+    VEHICLE_DEPARTURE_SUFFIX,
+    VEHICLE_SMART_CHARGING_SUFFIX,
+    WEEKDAYS,
 )
+from .vehicle_settings import parse_departure_time
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -464,14 +468,24 @@ class TibberDataUpdateCoordinator(DataUpdateCoordinator[TibberData]):
                 raise HomeAssistantError("Minimum charge level readback failed")
 
     async def async_clear_vehicle_departure_times(
-        self, vehicle_id: str, home_id: str, setting_keys: list[str]
+        self,
+        vehicle_id: str,
+        home_id: str,
+        setting_keys: list[str],
+        *,
+        single_attempt: bool = False,
+        refresh: bool = True,
     ) -> None:
         """Clear departure settings one per request, then refresh once.
 
         Tibber's Android app clears a departure time with one explicit null
         value per mutation. Sending several null settings in one mutation is
         accepted by the backend but does not clear existing times.
+
+        ``single_attempt`` sends each mutation exactly once (no client retries),
+        and ``refresh=False`` leaves the refresh to the caller.
         """
+        kwargs = {"retries": 1} if single_attempt else {}
         for key in dict.fromkeys(setting_keys):
             await self.client.gql(
                 queries.SET_VEHICLE_SETTINGS,
@@ -480,9 +494,151 @@ class TibberDataUpdateCoordinator(DataUpdateCoordinator[TibberData]):
                     "homeId": home_id,
                     "settings": [{"key": key, "value": None}],
                 },
+                **kwargs,
             )
-        if setting_keys:
+        if setting_keys and refresh:
             await self.async_request_refresh()
+
+    def vehicle_departure_keys(self, vehicle_id: str) -> dict[str, str] | None:
+        """Return the departure setting key per weekday, or None without a schedule.
+
+        Monday's key pins down the namespace the whole week lives in, the same
+        way the time entities resolve it.
+        """
+        monday_key = self.vehicle_setting_key(
+            vehicle_id, VEHICLE_DEPARTURE_SUFFIX.format(day="monday")
+        )
+        if monday_key is None:
+            return None
+        prefix = monday_key[: -len("monday")]
+        return {
+            day: self.vehicle_setting_key(
+                vehicle_id, VEHICLE_DEPARTURE_SUFFIX.format(day=day)
+            )
+            or prefix + day
+            for day in WEEKDAYS
+        }
+
+    def vehicle_departure_schedule(self, vehicle_id: str) -> dict[str, str | None]:
+        """Return the stored weekly schedule as weekday -> "HH:MM" or None."""
+        node = (self.data.vehicles.get(vehicle_id) if self.data else None) or {}
+        values = {
+            setting.get("key"): setting.get("value")
+            for setting in node.get("userSettings") or []
+        }
+        schedule: dict[str, str | None] = {}
+        for day, key in (self.vehicle_departure_keys(vehicle_id) or {}).items():
+            parsed = parse_departure_time(values.get(key))
+            schedule[day] = parsed.strftime("%H:%M") if parsed else None
+        return schedule
+
+    def vehicle_smart_charging(self, vehicle_id: str) -> bool | None:
+        """Return the stored smart-charging flag, if the vehicle has one."""
+        key = self.vehicle_setting_key(vehicle_id, VEHICLE_SMART_CHARGING_SUFFIX)
+        node = (self.data.vehicles.get(vehicle_id) if self.data else None) or {}
+        for setting in node.get("userSettings") or []:
+            if key is not None and setting.get("key") == key:
+                return str(setting.get("value")).lower() in ("true", "1")
+        return None
+
+    async def async_set_vehicle_departure_schedule(
+        self,
+        vehicle_id: str,
+        home_id: str,
+        schedule: dict[str, str | None],
+        smart_charging: bool | None = None,
+    ) -> dict[str, Any]:
+        """Write weekdays to the schedule, refresh once and verify the readback.
+
+        ``schedule`` maps weekday to "HH:MM" (set) or None (clear); weekdays not
+        listed are left alone. Times are written first, then each clear goes out
+        as its own null mutation, then the smart-charging flag. Every mutation is
+        sent once: a retried write after a lost response could land twice, and
+        the readback below is what tells whether it took. A weekly entry that
+        silently stays behind charges every week, so a mismatch raises.
+        """
+        keys = self.vehicle_departure_keys(vehicle_id)
+        if keys is None:
+            raise HomeAssistantError("Vehicle has no departure schedule")
+        smart_key = None
+        if smart_charging is not None:
+            smart_key = self.vehicle_setting_key(
+                vehicle_id, VEHICLE_SMART_CHARGING_SUFFIX
+            )
+            if smart_key is None:
+                raise HomeAssistantError("Vehicle has no smart-charging setting")
+
+        seen_before = self._last_seen.get(f"vehicle {vehicle_id}", (None, 0))[1]
+        try:
+            await self._write_departure_schedule(
+                vehicle_id, home_id, keys, schedule, smart_key, smart_charging
+            )
+        except TibberApiError as err:
+            # Earlier writes may have landed; pick up what Tibber holds now.
+            await self.async_request_refresh()
+            raise HomeAssistantError(
+                f"Writing the departure schedule failed: {err}"
+            ) from err
+
+        await self.async_refresh()
+        seen_after = self._last_seen.get(f"vehicle {vehicle_id}", (None, 0))[1]
+        if not self.last_update_success or seen_after <= seen_before:
+            raise HomeAssistantError("Departure schedule readback failed")
+
+        result = {
+            "schedule": self.vehicle_departure_schedule(vehicle_id),
+            "smart_charging": self.vehicle_smart_charging(vehicle_id),
+        }
+        mismatched = [
+            day for day, value in schedule.items() if result["schedule"][day] != value
+        ]
+        if smart_key is not None and result["smart_charging"] != smart_charging:
+            mismatched.append("smart_charging")
+        if mismatched:
+            raise HomeAssistantError(
+                "Tibber did not apply the departure schedule for: "
+                + ", ".join(mismatched)
+            )
+        return result
+
+    async def _write_departure_schedule(
+        self,
+        vehicle_id: str,
+        home_id: str,
+        keys: dict[str, str],
+        schedule: dict[str, str | None],
+        smart_key: str | None,
+        smart_charging: bool | None,
+    ) -> None:
+        """Send the schedule mutations, each exactly once, without refreshing."""
+        for day, value in schedule.items():
+            if value is not None:
+                await self.client.gql(
+                    queries.SET_VEHICLE_SETTINGS,
+                    {
+                        "vehicleId": vehicle_id,
+                        "homeId": home_id,
+                        "settings": [{"key": keys[day], "value": value}],
+                    },
+                    retries=1,
+                )
+        await self.async_clear_vehicle_departure_times(
+            vehicle_id,
+            home_id,
+            [keys[day] for day, value in schedule.items() if value is None],
+            single_attempt=True,
+            refresh=False,
+        )
+        if smart_key is not None:
+            await self.client.gql(
+                queries.SET_VEHICLE_SETTINGS,
+                {
+                    "vehicleId": vehicle_id,
+                    "homeId": home_id,
+                    "settings": [{"key": smart_key, "value": smart_charging}],
+                },
+                retries=1,
+            )
 
     async def async_set_charger_setting(
         self, charger_id: str, home_id: str, key: str, value: Any
