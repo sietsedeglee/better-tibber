@@ -92,6 +92,38 @@ The selected entities identify both the vehicle and weekdays; no Tibber vehicle
 ID or Home Assistant device ID is required. Use the vehicle's *Clear all
 departure times* button when the entire weekly schedule should be emptied.
 
+#### Setting the whole schedule in one call
+
+`tibber_app.set_departure_schedule` targets the vehicle device and writes any
+number of weekdays at once. Each weekday maps to `"HH:MM"` (set) or `null`
+(clear); weekdays not listed stay as they are. `clear_all: true` clears every
+weekday not listed, so `schedule: {}` with `clear_all: true` empties the week.
+The optional `smart_charging` flag is written after the schedule.
+
+```yaml
+action: tibber_app.set_departure_schedule
+target:
+  device_id: <vehicle device id>
+data:
+  schedule:
+    friday: "06:45"
+  clear_all: true
+  smart_charging: true
+response_variable: tibber_schedule
+```
+
+Times are written first, then every cleared day as its own `null` mutation
+(clearing several days in one mutation is accepted but does nothing), then one
+refresh. Each mutation is sent once, without automatic retries. The action then
+reads the schedule back and fails, naming the weekdays, if Tibber does not hold
+what was requested. The response holds all seven weekdays and the
+smart-charging flag as Tibber stores them after the call.
+
+**Departure times repeat every week.** A time set for a one-off trip charges
+to that deadline on the same weekday every following week until it is cleared,
+so an automation that sets one should also clear it afterwards and check the
+response (or the error) of that clearing call.
+
 \* Phase voltages/currents and signal strength are disabled by default — enable
 them per entity if you want them.
 
