@@ -57,7 +57,8 @@ async def async_setup_entry(
             for key, tkey, lo, hi, step in CHARGER_NUMBERS
         ]
     for home_id in coordinator.home_titles:
-        entities.append(TibberPeakLimitNumber(coordinator, home_id))
+        if home_id not in coordinator.peak_control_denied:
+            entities.append(TibberPeakLimitNumber(coordinator, home_id))
 
     async_add_entities(entities)
 

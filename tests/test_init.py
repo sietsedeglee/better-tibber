@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.helpers import entity_registry as er
 
 from custom_components.tibber_app import TibberRuntimeData
-from custom_components.tibber_app.api import TibberAuthError
+from custom_components.tibber_app.api import TibberApiError, TibberAuthError
+from custom_components.tibber_app.const import DOMAIN
 
 
 class TestSetupAndUnload:
@@ -76,3 +77,51 @@ class TestAuthFailureReauth:
         await hass.async_block_till_done()
 
         assert setup_integration.state is ConfigEntryState.LOADED
+
+
+class TestPeakControlNotAllowed:
+    async def test_setup_drops_peak_control_and_retries_once(
+        self, hass, config_entry, mock_client, caplog
+    ):
+        """A home without peak control (live: Tesla via car API, no charger)."""
+        dispatch = mock_client.gql.side_effect
+        polls: list[str] = []
+
+        async def gql(query, variables=None, *, partial_ok=False):
+            if "vehicle_ev_1" in query:
+                polls.append(query)
+                if "peakControlData" in query:
+                    raise TibberApiError(
+                        "GraphQL error: Home is not allowed to fetch "
+                        "PeakControl Gizmo data"
+                    )
+            return await dispatch(query, variables, partial_ok=partial_ok)
+
+        mock_client.gql = AsyncMock(side_effect=gql)
+        with (
+            patch(
+                "custom_components.tibber_app.TibberAppClient",
+                return_value=mock_client,
+            ),
+            patch("custom_components.tibber_app.LiveMeterManager") as live,
+        ):
+            live.return_value.async_stop = AsyncMock()
+            config_entry.add_to_hass(hass)
+            await hass.config_entries.async_setup(config_entry.entry_id)
+            await hass.async_block_till_done()
+
+        assert config_entry.state is ConfigEntryState.LOADED
+        assert len(polls) == 2
+        assert "peakControlData" not in polls[1]
+
+        coordinator = config_entry.runtime_data.coordinator
+        await coordinator.async_refresh()
+        assert len(polls) == 3
+        assert "peakControlData" not in polls[2]
+        assert caplog.text.count("does not allow peak control") == 1
+
+        reg = er.async_get(hass)
+        prefix = f"{config_entry.entry_id}_home-1_"
+        assert not reg.async_get_entity_id("switch", DOMAIN, prefix + "peak_control")
+        assert not reg.async_get_entity_id("number", DOMAIN, prefix + "peak_limit")
+        assert reg.async_get_entity_id("switch", DOMAIN, prefix + "away_mode")

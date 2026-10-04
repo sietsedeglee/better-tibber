@@ -57,6 +57,10 @@ _DEVICE_GIZMO_TYPES = frozenset(
     }
 )
 
+# The backend rejects the peak-control block for homes without the feature, and
+# fails the whole query with it rather than nulling just that field.
+_PEAK_CONTROL_DENIED = "not allowed to fetch peakcontrol"
+
 # Home-scoped devices: (gizmo type, alias prefix, GraphQL field, field selection).
 _HOME_DEVICE_BLOCKS = (
     (GIZMO_EV_CHARGER, "charger", "vehicleCharger", queries.CHARGER_FIELDS),
@@ -122,6 +126,8 @@ class TibberDataUpdateCoordinator(DataUpdateCoordinator[TibberData]):
         self.home_titles: dict[str, str] = {}
         # Homes that actually have Grid Rewards data (set at discovery).
         self.grid_reward_homes: set[str] = set()
+        # Homes whose peak-control data the backend refuses (set on first denial).
+        self.peak_control_denied: set[str] = set()
         # Last fetched grid rewards per home (kept across polls; the period query
         # is fetched separately because it errors for homes without data).
         self._grid_rewards: dict[str, dict[str, Any]] = {}
@@ -248,7 +254,12 @@ class TibberDataUpdateCoordinator(DataUpdateCoordinator[TibberData]):
         # whatever resolved and carry the rest over.
         first = self.data is None
         try:
-            raw = await self.client.gql(query, partial_ok=not first)
+            try:
+                raw = await self.client.gql(query, partial_ok=not first)
+            except TibberApiError as err:
+                if not self._deny_peak_control(err):
+                    raise
+                raw = await self.client.gql(self._build_query(), partial_ok=not first)
         except TibberAuthError as err:
             raise ConfigEntryAuthFailed(f"Authentication failed: {err}") from err
         except TibberApiError as err:
@@ -256,6 +267,24 @@ class TibberDataUpdateCoordinator(DataUpdateCoordinator[TibberData]):
         await self._fetch_grid_rewards()
         await self._fetch_inverter_production()
         return self._parse(raw)
+
+    def _deny_peak_control(self, err: TibberApiError) -> bool:
+        """Drop peak control from the query if ``err`` is its permission error.
+
+        The error does not say which home it is about, so every home still
+        asking for it stops doing so. Returns False when there is nothing left
+        to drop, so the caller re-raises instead of retrying the same query.
+        """
+        homes = set(self.home_titles) - self.peak_control_denied
+        if _PEAK_CONTROL_DENIED not in str(err).lower() or not homes:
+            return False
+        _LOGGER.warning(
+            "Tibber does not allow peak control data for this account; "
+            "peak control entities are disabled (%s)",
+            err,
+        )
+        self.peak_control_denied |= homes
+        return True
 
     def _build_query(self) -> str:
         """Assemble one combined query: account vehicles + per-home device blocks."""
@@ -272,9 +301,10 @@ class TibberDataUpdateCoordinator(DataUpdateCoordinator[TibberData]):
             home_parts = [
                 queries.PRICE_FIELDS,
                 queries.CONSUMPTION_GIZMO_FIELDS,
-                queries.PEAK_CONTROL_FIELDS,
                 queries.WEATHER_FIELDS,
             ]
+            if home_id not in self.peak_control_denied:
+                home_parts.append(queries.PEAK_CONTROL_FIELDS)
             for gtype, prefix, gql_field, fields in _HOME_DEVICE_BLOCKS:
                 for dev in self.devices_of_type(gtype):
                     if dev.home_id == home_id:

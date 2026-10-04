@@ -56,7 +56,8 @@ async def async_setup_entry(
         entities.append(TibberSmartChargingSwitch(coordinator, dev, key))
     for home_id in coordinator.home_titles:
         entities.append(TibberAwayModeSwitch(coordinator, home_id))
-        entities.append(TibberPeakControlSwitch(coordinator, home_id))
+        if home_id not in coordinator.peak_control_denied:
+            entities.append(TibberPeakControlSwitch(coordinator, home_id))
 
     async_add_entities(entities)
 
