@@ -72,3 +72,50 @@ git push origin main --tags
 failing the release if it doesn't — and publishes a GitHub release with
 auto-generated notes and a `tibber_app.zip` asset. HACS users see the update on
 their next refresh.
+
+### Minimum charge level
+
+Vehicles exposing a setting ending in `smartCharging.minChargeLimit` receive a
+configuration number named **Minimum charge level** (%). This is Tibber's reserve
+for spontaneous driving, separate from current battery level, Tesla's charge
+limit and `targetedStateOfCharge`. Online/offline setting keys are resolved from
+each vehicle's own `userSettings`.
+
+#### Usage
+
+Find **Minimum charge level** under the vehicle's configuration entities in
+**Settings → Devices & services → Better Tibber → your vehicle**, or add the
+number entity to a dashboard. Enter an allowed percentage and confirm the
+change. The displayed value is then read back from Tibber.
+
+The entity ID depends on the vehicle name and your entity registry. For
+example, `number.my_car_minimum_charge_level` can be changed from
+**Developer tools → Actions** or an automation:
+
+```yaml
+action: number.set_value
+target:
+  entity_id: number.my_car_minimum_charge_level
+data:
+  value: 20
+```
+
+Replace the example entity ID with your actual entity ID and choose a value
+within that entity's reported minimum, maximum and step. On the live-tested
+Tesla, the backend allows 0–75% in steps of 5%; 0 corresponds to **Off** in the
+Tibber app. Other vehicles use their own backend-provided bounds.
+
+This changes Tibber's reserve level, not the vehicle's final charge limit.
+It does not toggle Smart Charging. Renaming a dashboard label does not change
+the entity ID or its internal unique ID.
+
+#### Backend behaviour
+
+The allowed minimum, maximum and step come from the same backend
+`inputOptions.rangeOptions`, `pickerOptions.values` or a regular numeric
+`selectOptions` list used by the Android app. No limits are guessed:
+missing/invalid bounds or read-only settings make the number unavailable. Writes
+use the existing `setVehicleSettings` helper with an integer, followed by a
+coordinator refresh requiring fresh vehicle data. A write is sent only once,
+without mutation retries. State always comes from backend readback; it is never
+updated optimistically. Mutation and readback errors are reported to the caller.

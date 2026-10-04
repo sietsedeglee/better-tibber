@@ -32,7 +32,13 @@ VEHICLE_FIELDS = """
     summary { energyConsumed total }
     targetedStateOfCharge targetedDepartureTime
   }
-  userSettings { key value }
+  userSettings {
+    key value valueType isReadOnly
+    inputOptions {
+      type rangeOptions { min max step }
+      selectOptions { value } pickerOptions { values }
+    }
+  }
 """
 
 CHARGER_FIELDS = """

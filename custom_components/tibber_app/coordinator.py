@@ -16,7 +16,11 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
@@ -431,8 +435,15 @@ class TibberDataUpdateCoordinator(DataUpdateCoordinator[TibberData]):
 
     # -- mutation helpers ---------------------------------------------------
     async def async_set_vehicle_setting(
-        self, vehicle_id: str, home_id: str, key: str, value: Any
+        self,
+        vehicle_id: str,
+        home_id: str,
+        key: str,
+        value: Any,
+        *,
+        require_fresh_readback: bool = False,
     ) -> None:
+        kwargs = {"retries": 1} if require_fresh_readback else {}
         await self.client.gql(
             queries.SET_VEHICLE_SETTINGS,
             {
@@ -440,8 +451,17 @@ class TibberDataUpdateCoordinator(DataUpdateCoordinator[TibberData]):
                 "homeId": home_id,
                 "settings": [{"key": key, "value": value}],
             },
+            **kwargs,
         )
-        await self.async_request_refresh()
+        seen_before = self._last_seen.get(f"vehicle {vehicle_id}", (None, 0))[1]
+        if require_fresh_readback:
+            await self.async_refresh()
+        else:
+            await self.async_request_refresh()
+        if require_fresh_readback:
+            seen_after = self._last_seen.get(f"vehicle {vehicle_id}", (None, 0))[1]
+            if not self.last_update_success or seen_after <= seen_before:
+                raise HomeAssistantError("Minimum charge level readback failed")
 
     async def async_clear_vehicle_departure_times(
         self, vehicle_id: str, home_id: str, setting_keys: list[str]

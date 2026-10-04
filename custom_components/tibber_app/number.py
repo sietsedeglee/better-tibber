@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
 from homeassistant.const import PERCENTAGE, UnitOfElectricCurrent
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -22,6 +24,8 @@ CHARGER_NUMBERS: tuple[tuple[str, str, float, float, float], ...] = (
     ("offlineFallbackCurrent", "offline_fallback_current", 0, 32, 1),
 )
 
+
+MIN_CHARGE_SUFFIX = "smartCharging.minChargeLimit"
 
 PARALLEL_UPDATES = 0
 
@@ -41,6 +45,8 @@ async def async_setup_entry(
         # the override for such a vehicle is rejected by the backend. Anything
         # other than an explicit true keeps the entity, so vehicles that don't
         # report the flag at all behave as before.
+        if coordinator.vehicle_setting_key(dev.id, MIN_CHARGE_SUFFIX):
+            entities.append(TibberVehicleMinimumChargeNumber(coordinator, dev))
         battery = (coordinator.data.vehicles.get(dev.id) or {}).get("battery") or {}
         if battery.get("canReadLevel") is True:
             continue
@@ -83,6 +89,111 @@ class TibberVehicleSocNumber(TibberEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         await self.coordinator.async_set_vehicle_setting(
             self._device.id, self._device.home_id, VEHICLE_SOC_KEY, int(value)
+        )
+
+
+class TibberVehicleMinimumChargeNumber(TibberEntity, NumberEntity):
+    """Tibber's reserve for spontaneous driving, with app-defined bounds."""
+
+    _attr_translation_key = "minimum_charge_level"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_mode = NumberMode.BOX
+
+    def __init__(
+        self, coordinator: TibberDataUpdateCoordinator, device: TibberDevice
+    ) -> None:
+        super().__init__(coordinator, device, "minimum_charge_level")
+
+    @property
+    def _setting(self) -> dict[str, Any]:
+        key = self.coordinator.vehicle_setting_key(self._device.id, MIN_CHARGE_SUFFIX)
+        node = self.coordinator.data.vehicles.get(self._device.id) or {}
+        return next(
+            (s for s in node.get("userSettings") or [] if s.get("key") == key), {}
+        )
+
+    @property
+    def _bounds(self) -> tuple[int, int, int] | None:
+        inputs = self._setting.get("inputOptions") or {}
+        options = inputs.get("rangeOptions") or {}
+        lo, hi, step = (options.get(k) for k in ("min", "max", "step"))
+        if not all(type(v) is int for v in (lo, hi, step)):
+            raw = [s.get("value") for s in inputs.get("selectOptions") or []]
+            raw = raw or (inputs.get("pickerOptions") or {}).get("values") or []
+            try:
+                if any(isinstance(v, bool) or str(int(v)) != str(v) for v in raw):
+                    return None
+                values = sorted({int(v) for v in raw})
+            except (TypeError, ValueError):
+                return None
+            if len(values) < 2:
+                return None
+            lo, hi, step = values[0], values[-1], values[1] - values[0]
+            if values != list(range(lo, hi + 1, step)):
+                return None
+        if not 0 <= lo < hi <= 100 or step <= 0 or (hi - lo) % step:
+            return None
+        return lo, hi, step
+
+    @property
+    def capability_attributes(self) -> dict[str, Any] | None:
+        if self._bounds is None:
+            return {}
+        return super().capability_attributes
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and bool(self._setting)
+            and self._setting.get("isReadOnly") is False
+            and self._bounds is not None
+        )
+
+    @property
+    def native_min_value(self) -> float | None:
+        return self._bounds[0] if self._bounds else None
+
+    @property
+    def native_max_value(self) -> float | None:
+        return self._bounds[1] if self._bounds else None
+
+    @property
+    def native_step(self) -> float | None:
+        return self._bounds[2] if self._bounds else None
+
+    @property
+    def native_value(self) -> float | None:
+        value = self._setting.get("value")
+        if isinstance(value, bool):
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric if math.isfinite(numeric) else None
+
+    async def async_set_native_value(self, value: float) -> None:
+        bounds = self._bounds
+        if not self.available or bounds is None:
+            raise HomeAssistantError("Minimum charge level settings are unavailable")
+        lo, hi, step = bounds
+        if (
+            not math.isfinite(value)
+            or not float(value).is_integer()
+            or not lo <= value <= hi
+            or (int(value) - lo) % step
+        ):
+            raise HomeAssistantError(
+                "Minimum charge level is outside the allowed range"
+            )
+        await self.coordinator.async_set_vehicle_setting(
+            self._device.id,
+            self._device.home_id,
+            self._setting["key"],
+            int(value),
+            require_fresh_readback=True,
         )
 
 
