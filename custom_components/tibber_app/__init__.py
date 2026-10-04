@@ -7,8 +7,10 @@ from dataclasses import dataclass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.typing import ConfigType
 
 from .api import TibberAppClient
 from .const import (
@@ -22,6 +24,9 @@ from .const import (
 )
 from .coordinator import TibberDataUpdateCoordinator
 from .live import LiveMeterManager
+from .services import async_setup_services
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
@@ -45,6 +50,12 @@ class TibberRuntimeData:
 
 
 type TibberConfigEntry = ConfigEntry[TibberRuntimeData]
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register the integration-level actions once, independent of entries."""
+    async_setup_services(hass)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: TibberConfigEntry) -> bool:

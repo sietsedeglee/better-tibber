@@ -103,5 +103,25 @@
       "refresh": { "name": "Refresh" },
       "clear_all_departure_times": { "name": "Clear all departure times" }
     }
+  },
+  "services": {
+    "set_departure_schedule": {
+      "name": "Set departure schedule",
+      "description": "Write the weekly smart-charging departure schedule of a vehicle in one call, verify it against Tibber and return the schedule Tibber now holds. Departure times repeat every week until cleared.",
+      "fields": {
+        "schedule": {
+          "name": "Schedule",
+          "description": "Weekday (monday to sunday) mapped to a departure time (\"HH:MM\") or null to clear that day. Weekdays not listed stay unchanged."
+        },
+        "clear_all": {
+          "name": "Clear all",
+          "description": "Clear every weekday not listed in the schedule. With an empty schedule this empties the whole week."
+        },
+        "smart_charging": {
+          "name": "Smart charging",
+          "description": "Turn smart charging on or off in the same call, after the schedule is written."
+        }
+      }
+    }
   }
 }

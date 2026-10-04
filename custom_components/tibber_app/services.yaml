@@ -8,3 +8,24 @@ clear_departure_times:
     entity:
       integration: tibber_app
       domain: time
+
+set_departure_schedule:
+  target:
+    device:
+      integration: tibber_app
+      model: Electric Vehicle
+  fields:
+    schedule:
+      required: false
+      example: '{"friday": "07:30", "monday": null}'
+      selector:
+        object:
+    clear_all:
+      required: false
+      default: false
+      selector:
+        boolean:
+    smart_charging:
+      required: false
+      selector:
+        boolean:
